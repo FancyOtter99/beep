@@ -1,6 +1,11 @@
+# thisisberk.py
+from flask import Flask, send_file, Response
 from piano_transcription_inference import PianoTranscription, sample_rate, load_audio
 import numpy as np
 from scipy.io.wavfile import write
+import os
+
+app = Flask(__name__)
 
 def midi_to_freq(midi_note):
     return 440.0 * (2 ** ((midi_note - 69) / 12))
@@ -12,45 +17,57 @@ def generate_tone(freq, duration, sample_rate=44100):
     tone = 0.5 * np.sin(2 * np.pi * freq * t)
     return tone
 
-def main(audio_file):
-    print("Transcribing piano audio...")
-
-    # Step 1: Transcribe using deep model
+def transcribe_and_generate(audio_file):
     (audio, _) = load_audio(audio_file, sr=sample_rate, mono=True)
     transcriptor = PianoTranscription(device='cpu')
     notes = transcriptor.transcribe(audio)
 
-    print(f"Detected {len(notes)} notes")
-
-    # Step 2: Process notes → beep() format
     beep_lines = []
     wave_chunks = []
 
     for note in notes:
         freq = midi_to_freq(note['midi_note'])
         duration = note['offset_time'] - note['onset_time']
-        if duration <= 0: continue  # skip bad notes
+        if duration <= 0:
+            continue
         beep_lines.append(f"beep({round(freq, 2)}, {round(duration, 2)})")
         wave_chunks.append(generate_tone(freq, duration, sample_rate))
 
-    # Step 3: Write .txt file
+    # Write output files
     with open("notes.txt", "w") as f:
         for line in beep_lines:
             f.write(line + "\n")
-    print("Saved notes.txt")
 
-    # Step 4: Generate .wav file
     if wave_chunks:
         waveform = np.concatenate(wave_chunks)
         waveform /= np.max(np.abs(waveform))  # normalize
         write("notes.wav", sample_rate, np.int16(waveform * 32767))
-        print("Saved notes.wav")
     else:
-        print("No audio generated — no valid notes found")
+        # Write an empty wav if no notes detected
+        write("notes.wav", sample_rate, np.zeros(1, dtype=np.int16))
+
+@app.route("/")
+def index():
+    audio_file = "thisisberk.wav"
+    if not os.path.isfile(audio_file):
+        return "Audio file not found.", 404
+
+    transcribe_and_generate(audio_file)
+
+    # Prepare response HTML with links to download files
+    html = """
+    <h1>Transcription complete</h1>
+    <p><a href="/download/notes.txt">Download notes.txt</a></p>
+    <p><a href="/download/notes.wav">Download notes.wav</a></p>
+    """
+    return Response(html, mimetype="text/html")
+
+@app.route("/download/<filename>")
+def download_file(filename):
+    if filename not in ("notes.txt", "notes.wav"):
+        return "File not found", 404
+    return send_file(filename, as_attachment=True)
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python piano_to_beeps.py your_song.wav")
-        sys.exit(1)
-    main(sys.argv[1])
+    app.run(host="0.0.0.0", port=5000)
+
